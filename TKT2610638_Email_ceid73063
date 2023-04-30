@@ -1,0 +1,138 @@
+
+
+DECLARE
+    Sql_Id  NUMBER;
+    Ticket  VARCHAR2(20) := 'TKT2610638';
+    Task_Id NUMBER := Utl_p_Clm.General.Get_Task(Ticket,Medium => 'E');
+    --Give an internal name to your SQL
+    Select_Code VARCHAR2(30) := 'TKT2610638_FINAL'; --Auto generate 
+    --CMP number on null -- remove this line if RESI
+    --Pick a field set from V_DSQL_FIELD_SET (fields viewable in V_DSQL_FIELD_SET_COLS)
+    Select_Field_Set VARCHAR2(10) := 'ESTP'; --Field set needs to be set to 'MRG' for merge fields
+    --Specify your data team from V_DATA_TEAM
+    DATA_TEAM VARCHAR2(3) := 'ACD';
+    --Specify variables to be used upon execution or leave null for static SQL
+    Variables VARCHAR2(4000) := NULL;
+    --Leave any notes for the QC team
+    Notes VARCHAR2(4000) := NULL;
+    --Enumerate your SQL using the Oracle alternate quoting mechanism (the q'<>' thing)
+    Select_Contents CLOB := q'~
+    
+
+
+
+/*Ticket: TKT2610638
+CEID: 73063
+Writer: Charlene Persons
+
+Select Include: LUO students who received CEID 73,061 two weeks ago and havent completed the content competency form. Send to students personal and LU email accounts.
+Select Exclude: All standard exclusions (LUOA, LUE, deceased, FA Holds: FD/FI/FO, REG holds: BK/CI/CO/FR/RD)
+
+Exclude students who have completed this form: https://apex.liberty.edu/apex/banprd/f?p=253:14:::NO:RP:FORM_NAME:MAT_CONTENT_COMPETENCY
+*/
+
+
+--LUOA exclusion accounted for in CEID 70631
+SELECT /* +MATERIALIZE */ DISTINCT 
+
+base.pidm PIDM
+,'UNK' POP_CODE -- popcode is harcoded because dynamic makes it run for 40+ minutes
+,NULL ALTID
+,NULL ALTID_TYPE_CODE
+,NULL TERM
+,base.luid LUID
+,base.first_name FIRSTNAME
+,base.last_name LASTNAME
+,base.email EMAIL
+,case when lcur.prog_code_1 in ('MTMI-MAT-D','MTMR-MAT-D') then 'MAT Middle Grades Education'
+                     when lcur.prog_code_1 = 'DTMS-MAT-D' then 'MAT-EDS Middle Education Curriculum' end merge1
+,NULL MERGE2
+,NULL MERGE3
+,NULL MERGE4
+,NULL MERGE5
+,NULL MERGE6
+,NULL MERGE7
+,NULL MERGE8
+,NULL MERGE9
+,NULL MERGE10
+,'1210' POP_ID
+
+from   (select iden.spriden_pidm pidm, --Base pop of students who received CEID 70631
+               -- ,pop_code --pull pop code from previous send
+               iden.spriden_id luid,
+               iden.spriden_first_name first_name,
+               iden.spriden_last_name last_name,
+               emal.email_address email
+        from   zcampent.zcrmque e
+        join   spriden iden
+        on     iden.spriden_pidm = e.zcrmque_pidm
+               and iden.spriden_change_ind is null
+        join   zexec.zsavemal emal
+        on     emal.pidm = iden.spriden_pidm
+               and emal.emal_code_group in ('LU', 'PER')
+               and emal.emal_code_group_rank = 1
+               and (emal.stp_date is null or emal_code = 'LU')
+               and length(email_address) <= 50
+        where  e.zcrmque_campaign_number = 73061
+               and e.zcrmque_campaign_system = 'CE01' --CEID
+               and trunc(e.zcrmque_date_added) = trunc(sysdate) - 14 --TURN ON AFTER TESTING
+               and trunc(e.zcrmque_date_added) >= to_date('03/12/2023','MM/DD/YYYY') -- STOPBACK
+        ) base
+
+-- standard subterm
+join zexec.zsavlcur lcur on lcur.pidm = base.pidm
+     and (select max(term_code) as current_term
+     from zbtm.terms_by_group_v
+     where group_code = 'STD'
+     and semester != 'WIN'
+     and start_date <= trunc(sysdate)) between lcur.from_term and lcur.end_term
+
+-- exclude deceased
+join   saturn.spbpers spbpers
+on     spbpers.spbpers_pidm = base.pidm
+       and spbpers.spbpers_dead_ind is null
+
+left   join zexec.zcvattr lue
+on     lue.zcvattr_pidm = base.pidm --exclude LUE (non-English speakers)
+       and lue.zcvattr_type = 'stu' --No term code so we don''t miss any students
+left   join faismgr.rorhold
+on     rorhold_pidm = base.pidm --Financial Aid Holds
+       and rorhold_hold_code in ('FD', 'FI', 'FO')
+       and trunc(sysdate) between rorhold_from_date and rorhold_to_date
+left   join saturn.sprhold
+on     sprhold_pidm = base.pidm --Registration Holds
+       and sprhold_hldd_code in ('BK', 'CI', 'CO', 'FR', 'RD')
+       and trunc(sysdate) between sprhold_from_date and sprhold_to_date
+where  sprhold_pidm is null
+       and rorhold_pidm is null
+       and lue.zcvattr_pidm is null
+       and regexp_like(base.email, '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,4}$')
+       and not exists (select distinct b.szbsubm_id sub_id --Exclude completed form
+        from   zraft.szbsubm b
+        join   zgeneral.zgbwfpr pr
+        on     pr.zgbwfpr_proc_id = b.szbsubm_wf_proc_id
+        --AND    pr.zgbwfpr_active_ind = 'N' --This would be included if we only wanted to exclude fully reviewed submissions
+        where  b.szbsubm_orig_sub_date is not null
+               and b.szbsubm_pidm = base.pidm)
+       and not exists (select e2.zcrmque_pidm
+        from   zcampent.zcrmque e2 --Only send this email to student once
+        where  e2.zcrmque_campaign_number = 73063--CEID of This Email
+               and e2.zcrmque_to_email_address = base.email
+               and e2.zcrmque_campaign_system = 'CE01'
+               and e2.zcrmque_pidm = base.pidm)
+       and not exists (select base.pidm from utl_p_clm.recipients r
+               where r.pidm = base.pidm
+              and trunc(r.added) >= trunc(sysdate-10)
+              --and r.task_id in (#####) 
+              and r.uploaded = 'Z'
+              and r.invd_code is null)
+
+  
+ ~';
+BEGIN
+    Utl_p_Clm.Data_Team.One_Off_Qc_Ready(Task_Id => Task_Id, DATA_TEAM => DATA_TEAM, Sql_Code => Select_Contents, Field_Set => Select_Field_Set, Sql_Id => Select_Code, Variables => Variables, Notes => Notes,Send_Campaign_Qc => false,Send_Sql_Qc => false);
+END;
+    
+    
+      
+-- enter old sql code from old ticket
