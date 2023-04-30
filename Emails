@@ -1,0 +1,219 @@
+-- send to LUOA k-12 affiliates for students who are full time
+
+WITH aff as (SELECT /*+ MATERIALIZE*/ DISTINCT 
+                          stu.studentpidm                   stu_pidm,
+                          stu.spriden_first_Name            stu_first,
+                          stu.spriden_last_name             stu_last,
+                          szrattr.szrattr_contract_pidm     schl_pidm,
+                          c.spriden_id                      schl_id,
+                          c.spriden_first_name              schl_first,
+                          c.spriden_last_name               schl_last,
+                          szrattr.szrattr_atts_code         schl_code,
+                          poc.spriden_first_name            poc_first,
+                          poc.spriden_last_name             poc_last,
+                          poc.spriden_id                    poc_luid,
+                          poc.spriden_pidm                  poc_pidm                                                  
+            FROM (SELECT a.studentid,
+                         a.studentpidm,
+                         iden.spriden_first_name,
+                         iden.spriden_last_name,
+                         a.affl_attr
+                    FROM utl_d_luo.rsbbluoaenrl a
+                   join spriden iden on iden.spriden_pidm = a.studentpidm
+      and iden.spriden_change_ind is null
+            and iden.spriden_id like 'L%'
+                   WHERE a.last_term =
+                         (SELECT MAX(a2.last_term)
+                         FROM utl_d_luo.rsbbluoaenrl a2
+                         WHERE a.studentpidm = a2.studentpidm)
+                 ) stu 
+           INNER JOIN zsaturn.szrattr
+              ON szrattr.szrattr_atts_code = stu.affl_attr
+           INNER JOIN spriden c
+              ON szrattr.szrattr_contract_pidm = c.spriden_pidm
+             AND c.spriden_change_ind IS NULL
+            join goradid did on did.goradid_additional_id = c.spriden_id
+                              and did.goradid_adid_code = 'LCIA'
+              join spriden poc on poc.spriden_pidm = did.goradid_pidm
+                              and poc.spriden_change_ind is null
+            LEFT JOIN (SELECT tbbcont_pidm pidm,
+                              MIN(tbbcont_term_code) min_term,
+                              MAX(tbbcont_term_code) max_term
+                         FROM tbbcont
+                       --where tbbcont_tprl_code = 'LUOA'
+                        GROUP BY tbbcont_pidm) contract
+              ON szrattr.szrattr_contract_pidm = contract.pidm
+           WHERE szrattr_zbrd_code = 'LUOA'
+                --limit list to those whose contract term is in the current or future term
+             AND nvl(contract.max_term, '999999') >= (SELECT MIN(term_code) curr_term
+                                                        FROM zbtm.terms_by_group_v
+                                                       WHERE group_code = 'ACD'
+                                                         AND end_date > sysdate)
+             AND nvl(szrattr_term_code_to, '999999') >= (SELECT MIN(term_code) curr_term
+                                                           FROM zbtm.terms_by_group_v
+                                                          WHERE group_code = 'ACD'
+                                                            AND end_date > sysdate)
+             )
+                                                            
+, stud AS (
+ select /*+ materialize*/ DISTINCT
+                    att.sgrsatt_pidm                             pidm
+                   ,iden.spriden_id                              luid
+                   ,iden.spriden_first_name                      firstname
+                   ,iden.spriden_last_name                       lastname
+                   ,curr.title                                   course_name
+                   ,CASE WHEN curr.hr = 1.000 THEN 'Full Year'
+                         WHEN curr.hr = 0.500 THEN 'Semester' END   course_length
+                   ,case when to_char(curr.ptrm_start, 'MON') in ('JAN', 'FEB', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
+                          then initcap(to_char(curr.ptrm_start, 'MON. DD'))
+                          else initcap(to_char(curr.ptrm_start, 'fmMONTHDD')) end start_date
+                 
+                   
+              from sgrsatt att
+              cross join(SELECT max(term_code) as current_term
+                               from zbtm.terms_by_group_v
+                              where group_code = 'ACD' 
+                                and semester != 'WIN'
+                                and start_date <= sysdate) 
+
+              JOIN (SELECT DISTINCT crse.pidm, crse.crn, crse.term_code, crse.credit_hr hr, crse.ptrm_start, crse.ptrm_end, crse.title
+                      from utl_d_aim.szrcrse crse --In an ongoing course                  
+                      join stvrsts rsts on rsts.stvrsts_code = crse.rsts_code
+                       and rsts.stvrsts_incl_sect_enrl = 'Y'
+                     WHERE crse.final_grade is NULL   --exclude courses with final grades
+                       AND crse.numb NOT LIKE '3___'  --exclude dual enrolled only
+                       AND TRUNC(SYSDATE) BETWEEN TRUNC(crse.ptrm_start) AND TRUNC(crse.ptrm_end)
+                       and crse.group_code = 'ACD'
+                       AND crse.rsts_code NOT IN ('WD','DD')  --exclude withdrawn courses (marked WD or DD)
+                              ) curr ON curr.pidm = att.sgrsatt_pidm
+
+              JOIN spriden iden
+                ON iden.spriden_pidm = att.sgrsatt_pidm
+               AND iden.spriden_change_ind IS NULL
+              
+              where att.sgrsatt_atts_code in (select d.zfrlist_key1_code
+                                  from zformdata.zfrlist d
+                                 where zfrlist_list_code = 'LUOA_ATTRIBUTE_EXT'
+                                   and zfrlist_active_yn = 'Y'
+                                   and d.zfrlist_char_02 = 'FT' --part time full time or NA (probably affiliate)
+                                   and d.zfrlist_char_03 = 'Yes' --affiliate Yes or No
+                                   --and d.zfrlist_char_04 = 'No' --dual enrolled Yes or No; didnt make seem to make a difference if used or not
+                                   )
+              and att.sgrsatt_term_code_eff = (select max(beta.sgrsatt_term_code_eff)
+                                               from sgrsatt beta
+                                               where beta.sgrsatt_pidm = att.sgrsatt_pidm
+                                                 and beta.sgrsatt_term_code_eff <= current_term--relevant_term
+                                       )
+              AND curr.term_code = current_term
+              AND curr.hr = 0.500  --semester based courses only
+              AND trunc(sysdate) between trunc(curr.ptrm_start + 136) and trunc(curr.ptrm_start + 140) -- 4.5 months, 136 days
+              
+              GROUP BY att.sgrsatt_pidm
+                      ,iden.spriden_id
+                      ,iden.spriden_first_name
+                      ,iden.spriden_last_name
+                      ,curr.hr
+                      ,curr.title
+                      ,curr.ptrm_start
+ )
+, base AS(
+            SELECT
+                aff.poc_pidm pidm,
+                aff.poc_luid luid,
+                aff.poc_first firstname,
+                aff.poc_last lastname,
+                aff.poc_first||' '||aff.poc_last merge1,
+                stud.start_date merge2,
+                e.email_address Email,
+                to_clob(Xmlelement("table", Xmlattributes('clob1' as "id"), 
+                   Xmlforest(Xmlelement("tr", xmlattributes('rowhead' as "class"), 
+                   Xmlconcat(                                            --COLUMN HEADERS
+                             xmlelement("td",xmlattributes('colHead' as "class"), 'First Name'), 
+                             xmlelement("td",xmlattributes('colHead' as "class"), 'Last Name'),
+                             xmlelement("td",xmlattributes('colHead' as "class"), 'LUID'),
+                             xmlelement("td",xmlattributes('colHead' as "class"), 'Course'),
+                             xmlelement("td",xmlattributes('colHead' as "class"), 'Start Date'))) AS "thead",
+                   Xmlagg(
+                             Xmlforest(Xmlconcat(                        --COLUMN DATA
+                                         xmlelement("td",xmlattributes('colData' as "class"),stud.firstname),
+                                         xmlelement("td",xmlattributes('colData' as "class"),stud.lastname),                           
+                                         xmlelement("td",xmlattributes('colData' as "class"),stud.luid),
+                                         xmlelement("td",xmlattributes('colData' as "class"),stud.course_name),
+                                         xmlelement("td",xmlattributes('colData' as "class"),stud.start_date)) AS "tr") 
+                         order by 1,2 ) AS "tbody")).getclobval() ) clob1,
+                to_char(sysdate, 'YYYY') cyear,
+                CASE  when lower(e.email_address) not like '%@liberty.edu' then
+                        '<a href="http://www.liberty.edu/subscribe/index.cfm?id=' ||
+                        zexec.zargos.zexec_zcrypt_encryptdecrypt('DES3', 'ohD7dj39JcFJdm2uL7z79P0I6afQAsdu',
+                        'email=' || e.email_address || chr(38) || 'category=' ||
+                        (select ztvtopc_desc from zgeneral.ztvtopc where ztvtopc_code = 'LU_OAC') || chr(38) || 'code=' ||
+                        'LU_OAC' || chr(38) || 'pidm=' || aff.poc_pidm || chr(38) || 'campaignid=' || {%CAMPAIGN_ID%}, --Enter Campaign ID here
+                        'E') ||
+                        '" style="text-decoration:none;" title="Unsubscribe from emails">Click here to Unsubscribe</a>'
+                        end unsubscribelink
+
+            FROM aff 
+
+            JOIN stud ON stud.pidm = aff.stu_pidm
+
+            JOIN (SELECT DISTINCT emal.email_address email_address, emal.pidm FROM zexec.zsavemal emal) e ON e.pidm = aff.poc_pidm
+            
+            WHERE 1=1
+              AND NOT exists (select 1
+                                from UTL_D_PP.WHSENTMESSAGELOG wh
+                               where wh.user_field1 = stud.start_date
+                                 AND wh.campaign_system = 'CE01'
+                                 and trunc(wh.activity_date) between trunc(sysdate - 10) and trunc(SYSDATE)
+                                 and wh.campaignid = 73468)
+              and case when lower(e.email_address) like '%@liberty.edu' then 'Y' else zexec.gz_commsprefs.can_send(p_commkey =>
+                                              e.email_address,p_pidm => aff.poc_pidm ,p_comt => 'EMAIL',p_topc => 'LU_OAC') end = 'Y'
+              and length(e.email_address) < 51
+              and regexp_like(e.email_address,'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,4}$')
+            
+            GROUP BY aff.poc_pidm
+                    ,aff.poc_luid
+                    ,aff.poc_first
+                    ,aff.poc_last
+                    ,e.email_address
+                    ,stud.start_date
+)
+
+SELECT  
+      base.pidm,
+      base.luid,
+      base.firstname,
+      base.lastname,
+      base.merge1,
+      base.merge2,
+      base.email,
+      base.clob1,
+      base.cyear,
+      base.unsubscribelink
+FROM base
+WHERE ROWNUM = 1
+
+UNION ALL  --seed union
+
+SELECT           
+                s.pidm,
+                s.luid,
+                s.firstname,
+                s.lastname,
+                q.merge1,
+                q.merge2,
+                s.email,
+                q.clob1,
+                q.cyear,
+                q.unsubscribelink
+
+  FROM cemassmailer.ads_email_seed s
+
+  JOIN (SELECT * FROM base WHERE rownum = 1) q
+    ON 1 = 1  
+
+  LEFT JOIN cemassmailer.ads_email_signature da
+    ON 1 = 1 AND parameter = 'LUOAADV'
+
+ WHERE s.seedtype IN ('LUOA') AND s.firstname IS NOT NULL
+       
+
