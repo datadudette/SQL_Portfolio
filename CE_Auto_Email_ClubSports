@@ -1,0 +1,94 @@
+-- Send to all students in club sport
+-- This demonstrates understanding and use of XML, subqueries, regex, listagg, and SQL functions
+
+select pidm
+       ,luid
+       ,firstname
+       ,lastname
+       ,email
+       ,to_clob(Xmlelement("table", Xmlattributes('clob1' as "id"), 
+             Xmlforest(Xmlelement("tr", xmlattributes('rowhead' as "class"), 
+             Xmlconcat(                                            --COLUMN HEADERS
+                       xmlelement("td",xmlattributes('colHead' as "class"), 'NAME'),      
+                       xmlelement("td", xmlattributes('colHead' as "class") ,'LUID'),
+                      xmlelement("td",xmlattributes('colHead' as "class"), 'COURSE'),
+                       xmlelement("td", xmlattributes('colHead' as "class") ,'SPORT'))) AS "thead",
+             Xmlagg(
+                       Xmlforest(Xmlconcat(                        --COLUMN DATA
+                                   xmlelement("td",xmlattributes('colData' as "class"),stu_name),
+                                   xmlelement("td",xmlattributes('colData' as "class"),stu_id),
+                                   xmlelement("td",xmlattributes('colData' as "class"),crs),
+                                   xmlelement("td",xmlattributes('colData' as "class"),sprt)) AS "tr") 
+                      ) AS "tbody")).getclobval())
+                      clob1  
+       ,to_char(sysdate,'YYYY') cyear
+       ,case when lower(email) not like '%@liberty.edu' then
+            '<a href="http://www.liberty.edu/subscribe/index.cfm?id=' ||zexec.zargos.zexec_zcrypt_encryptdecrypt('DES3','ohD7dj39JcFJdm2uL7z79P0I6afQAsdu',
+            'email=' || email ||chr(38) || 'category=' ||(select ztvtopc_desc from zgeneral.ztvtopc where ztvtopc_code = 'LU_ATH' ) ||
+            chr(38) || 'code=' ||'LU_ATH'  || chr(38) ||'pidm=' || pidm || chr(38) ||'campaignid=' || {%CAMPAIGN_ID%},
+            'E') ||'" style="text-decoration:none;" title="Unsubscribe from emails">Click here to Unsubscribe</a>'
+             end unsubscribelink 
+             
+from (select distinct crse.faculty_pidm pidm
+             ,crse.faculty_id luid
+             ,crse.faculty_first_name firstname
+             ,crse.faculty_last_name lastname
+             ,crse.faculty_email email
+             ,crse.course||'-'||crse.sect crs
+             ,spriden_id stu_id
+             ,spriden_first_name||' '||spriden_last_name stu_name
+             ,listagg(distinct case when stvactc.stvactc_desc like '%Men%Track%' then 'Track' 
+                   when stvactc.stvactc_desc like '%Women%Track%' then 'Track'
+                   when stvactc.stvactc_desc like '%Men%' then substr(stvactc_desc,instr(stvactc_desc,'Men''s',1)+6)
+                   when stvactc.stvactc_desc like '%Women%' then substr(stvactc_desc,instr(stvactc_desc,'Women''s',1)+8) 
+                   else substr(stvactc.stvactc_desc,7) end,', ') sprt
+
+      from utl_d_aim.szrcrse crse
+
+      join sgrsprt
+           on sgrsprt_pidm = crse.pidm   
+           and sgrsprt.sgrsprt_term_code = (select max(term_code)
+               from zbtm.terms_by_group_v
+               where group_code = 'STD' --STD or ACD?                                
+               and semester != 'WIN'
+               and start_date <= sysdate
+               and term_code like '%40')
+
+      join stvactc
+           on stvactc.stvactc_code = sgrsprt.sgrsprt_actc_code  
+           and stvactc.stvactc_actp_code = 'SPRTS'   
+           and stvactc.stvactc_accg_code = 'CLUB'    
+           
+           join sprhold on sprhold_pidm = crse.pidm
+          and trunc(sysdate) between sprhold_from_date and sprhold_to_date       
+           
+      join spriden
+           on spriden_pidm = crse.pidm
+           and spriden_change_ind is null  
+                
+      where crse.term_code = (select max(term_code)
+               from zbtm.terms_by_group_v
+               where group_code = 'STD' --STD or ACD?                                
+               and semester != 'WIN'
+               and start_date <= sysdate)
+      and faculty_pidm is not null
+      and sprhold_hldd_code = 'CA'
+      group by crse.faculty_pidm 
+               ,crse.faculty_id 
+               ,crse.faculty_first_name 
+               ,crse.faculty_last_name 
+               ,crse.faculty_email
+               ,crse.course||'-'||crse.sect 
+               ,spriden_id 
+               ,spriden_first_name||' '||spriden_last_name      
+      )
+where case when lower(email) like '%@liberty.edu' then 'Y' else zexec.gz_commsprefs.can_send(p_commkey => 
+           email,p_pidm => pidm,p_comt => 'EMAIL',p_topc => 'LU_ATH') end = 'Y'
+and length(email) < 51
+and regexp_like(email,'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,4}$')  
+--and rownum <= 1    
+group by pidm
+         ,luid
+         ,firstname
+         ,lastname
+         ,email
